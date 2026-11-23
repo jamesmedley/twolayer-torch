@@ -25,10 +25,14 @@ import torch
 
 import config
 from data import (
+    BSD500ClipStream,
+    BSD500CropMargins,
     CropMargins,
     Layer1ClipStream,
     WhiteningParams,
+    bsd500_to_whitening_input,
     learn_whitening,
+    load_bsd500_npy_dir,
     load_raw_dataset,
 )
 from models.layer1 import Layer1, Layer1Config
@@ -258,21 +262,60 @@ def main() -> None:
     print(f"Data root: {args.data_root}")
     print(f"Output directory: {args.output_dir}")
 
-    raw = load_raw_dataset(args.data_root)
-    margins = CropMargins(
-        top=config.CROP_MARGIN_TOP,
-        left=config.CROP_MARGIN_LR,
-        right=config.CROP_MARGIN_LR,
-        bottom=config.CROP_MARGIN_BOTTOM,
+    # ---- Data source: BSD500 stills (.npy) vs natural-movie chunks -------
+    data_root = Path(args.data_root)
+    npy_files = sorted(data_root.glob("*.npy"))
+    chunk_dir = data_root / "vid075-chunks"
+    has_chunks = chunk_dir.is_dir() and any(
+        p.is_file() for p in chunk_dir.iterdir()
     )
+    use_bsd500 = bool(npy_files and not has_chunks)
 
-    whitening = learn_whitening(
-        raw,
-        args.patch_size,
-        params=WhiteningParams(),
-        rng=data_rng,
-        margins=margins,
-    )
+    if use_bsd500:
+        # BSD500 stills: rotation applied at sampling time via BSD500ClipStream.
+        print(
+            f"Detected BSD500 npy stills in {data_root} ({len(npy_files)} images)."
+        )
+        images = load_bsd500_npy_dir(data_root)
+        raw = bsd500_to_whitening_input(images)
+        margins = BSD500CropMargins(
+            top=config.CROP_MARGIN_TOP,
+            left=config.CROP_MARGIN_LR,
+            right=config.CROP_MARGIN_LR,
+            bottom=config.CROP_MARGIN_BOTTOM,
+        )
+        whitening = learn_whitening(
+            raw,
+            args.patch_size,
+            params=WhiteningParams(),
+            rng=data_rng,
+            margins=margins,
+        )
+    elif has_chunks:
+        # Natural-movie chunks: pre-baked video, rotation already baked in.
+        print(f"Detected natural-movie chunks in {chunk_dir}.")
+        raw = load_raw_dataset(args.data_root)
+        margins = CropMargins(
+            top=config.CROP_MARGIN_TOP,
+            left=config.CROP_MARGIN_LR,
+            right=config.CROP_MARGIN_LR,
+            bottom=config.CROP_MARGIN_BOTTOM,
+        )
+        whitening = learn_whitening(
+            raw,
+            args.patch_size,
+            params=WhiteningParams(),
+            rng=data_rng,
+            margins=margins,
+        )
+    else:
+        raise SystemExit(
+            f"No valid data source found in {args.data_root}. "
+            "Expected either .npy stills (BSD500) or vid075-chunks/ "
+            "(natural movies). Put the raw chunks in vid075-chunks/ or pass "
+            "a different --data-root."
+        )
+
     whitening.save_npz(
         args.output_dir / f"whitening_patch{args.patch_size}.npz"
     )
@@ -334,15 +377,27 @@ def main() -> None:
             f"(eta={eta:.3e})."
         )
 
-    stream = Layer1ClipStream(
-        raw,
-        whitening,
-        clip_length=args.clip_length,
-        patch_size=args.patch_size,
-        batch_size=args.batch_size,
-        margins=margins,
-        seed=args.seed,
-    )
+    if use_bsd500:
+        stream = BSD500ClipStream(
+            images,
+            whitening,
+            clip_length=args.clip_length,
+            patch_size=args.patch_size,
+            batch_size=args.batch_size,
+            margins=margins,
+            seed=args.seed,
+            image_size=config.BSD500_IMAGE_SIZE,
+        )
+    else:
+        stream = Layer1ClipStream(
+            raw,
+            whitening,
+            clip_length=args.clip_length,
+            patch_size=args.patch_size,
+            batch_size=args.batch_size,
+            margins=margins,
+            seed=args.seed,
+        )
 
     phases = [(args.epochs, args.eta_target)]
     if args.anneal_epochs > 0:

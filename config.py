@@ -66,7 +66,7 @@ LAYER1_INFER_CONV_TOL = 1e-4
 # ---------------------------------------------------------------------------
 # Layer 1 training
 # ---------------------------------------------------------------------------
-LAYER1_EPOCHS = 100
+LAYER1_EPOCHS = 80
 LAYER1_ANNEAL_EPOCHS = 20
 LAYER1_TRIALS_PER_EPOCH = 1000  # clips sampled and basis updates per epoch
 LAYER1_BATCH_SIZE = 64          # clips per batched inference call; one basis update per batch
