@@ -681,7 +681,15 @@ class Layer1(nn.Module):
             rn = self.A_real.norm(dim=0, keepdim=True).clamp(min=eps)
             im = self.A_imag.norm(dim=0, keepdim=True).clamp(min=eps)
             self.A_real.div_(rn)
+            st = self.ada._state.get(id(self.A_real))
+            if st is not None:
+                st["exp_avg"].mul_(rn)
+                st["exp_avg_sq"].mul_(rn.square())
             self.A_imag.div_(im)
+            st = self.ada._state.get(id(self.A_imag))
+            if st is not None:
+                st["exp_avg"].mul_(im)
+                st["exp_avg_sq"].mul_(im.square())
 
         return step_max
 

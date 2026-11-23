@@ -105,6 +105,7 @@ LAYER2_W_SIGMA = .2236           # (sqrt 0.5) Cauchy sparsity scale for w
 LAYER2_KAPPA = 4             # phase noise factor for the circular data term
 LAYER2_EPS = 1e-12             # epsilon for normalisation / numerical stability
 LAYER2_MOTION_A_THRESH = 0.2    # Motion activation threshold on amplitude (notebook motion_a_thresh)
+LAYER2_MOTION_A_ON_FRACTION = 0.25   # Target fraction of active entries; if not None, the threshold is computed adaptively as the percentile of layer-1 amplitudes (matches MATLAB init_phasetrans.m).
 
 # Layer 2 inference
 LAYER2_INFER_ITERS = 100       # Max L-BFGS iterations per inference call

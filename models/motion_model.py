@@ -429,6 +429,15 @@ class MotionModel(nn.Module):
             eps = self.config.eps
             dn = self.D.norm(dim=0, keepdim=True).clamp(min=eps)
             self.D.div_(dn)
+            # Re-scale Adam moments so they stay aligned with the
+            # re-normalised parameter geometry. Since p -> p / dn scales
+            # gradients by dn, the first moment scales by dn and the
+            # second moment by dn^2. The ratio m / sqrt(v) is invariant,
+            # preserving Adam's adaptive learning-rate behaviour.
+            st = self.ada._state.get(id(self.D))
+            if st is not None:
+                st["exp_avg"].mul_(dn)
+                st["exp_avg_sq"].mul_(dn.square())
 
         return step_max
 

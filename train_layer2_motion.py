@@ -238,6 +238,37 @@ def _save_checkpoint(
     )
 
 
+def _compute_motion_threshold(
+    layer1: Layer1,
+    stream,
+    *,
+    n_clips: int,
+    device: torch.device,
+    a_on_fraction: float,
+) -> float:
+    """Compute a data-adaptive motion activity threshold.
+
+    Samples ``n_clips`` clips, runs frozen layer-1 inference on each, collects
+    all amplitudes, and returns the value at the ``(1 - a_on_fraction)``
+    percentile. This matches MATLAB's ``init_phasetrans.m`` behaviour: the
+    top ``a_on_fraction`` fraction of amplitudes are kept active, adapting to
+    whatever amplitude scale layer-1 produces.
+    """
+    amplitudes: list[np.ndarray] = []
+    remaining = n_clips
+    while remaining > 0:
+        count = min(stream.batch_size, remaining)
+        x = stream.sample_batch(n_clips=count)
+        with torch.no_grad():
+            a, _ = layer1.infer_lbfgs(x, n_iters=100)
+        amplitudes.append(a.detach().cpu().numpy())
+        remaining -= count
+
+    a_flat = np.concatenate([arr.reshape(-1) for arr in amplitudes])
+    threshold = float(np.percentile(a_flat, 100.0 * (1.0 - a_on_fraction)))
+    return threshold
+
+
 def main() -> None:
     args = _parse_args()
     if args.log_every <= 0:
@@ -399,6 +430,27 @@ def main() -> None:
             seed=args.seed,
         )
 
+    # Calibrate motion activity threshold from layer-1 amplitudes so it adapts
+    # to whatever amplitude scale the trained layer-1 produces (matches MATLAB
+    # init_phasetrans.m: 75th percentile of sorted amplitudes).
+    motion_a_thresh = config.LAYER2_MOTION_A_THRESH
+    if config.LAYER2_MOTION_A_ON_FRACTION is not None:
+        motion_a_thresh = _compute_motion_threshold(
+            layer1,
+            stream,
+            n_clips=100,
+            device=device,
+            a_on_fraction=config.LAYER2_MOTION_A_ON_FRACTION,
+        )
+        print(
+            f"Computed motion activity threshold={motion_a_thresh:.4f} "
+            f"(target active fraction={config.LAYER2_MOTION_A_ON_FRACTION})."
+        )
+    else:
+        print(f"Using fixed motion activity threshold={motion_a_thresh}.")
+
+    motion_config.motion_a_thresh = motion_a_thresh
+
     phases = [(args.epochs, args.eta_target)]
     if args.anneal_epochs > 0:
         phases.append(
@@ -463,8 +515,8 @@ def main() -> None:
                 dim=-2,
             )
             base = (
-                (a[..., 1:, :] > config.LAYER2_MOTION_A_THRESH)
-                & (a[..., :-1, :] > config.LAYER2_MOTION_A_THRESH)
+                (a[..., 1:, :] > motion_a_thresh)
+                & (a[..., :-1, :] > motion_a_thresh)
             )
             zeros = a.new_zeros((*a.shape[:-2], 1, a.shape[-1]), dtype=torch.bool)
             active = torch.cat((zeros, base), dim=-2).to(phi_dot.dtype)
@@ -512,13 +564,14 @@ def main() -> None:
             if (trial_before // args.log_every) != (trial // args.log_every):
                 elapsed = time.perf_counter() - start_time
                 grad_mag = float(grad_D.abs().mean().item())
+                active_frac = float(active.mean().item())
                 print(
                     f"phase {phase_index + 1} "
                     f"epoch {epoch_index + 1}/{len(epoch_schedule)} "
                     f"trial {trial}/{n_updates}: "
                     f"energy/clip-frame={batch_mean_energy:.6f}, "
                     f"eta={eta:.3e}, step_max={step_max_value:.4g}, "
-                    f"|grad_D|={grad_mag:.4g}, "
+                    f"|grad_D|={grad_mag:.4g}, active_frac={active_frac:.4f}, "
                     f"elapsed={elapsed:.1f}s"
                 )
 

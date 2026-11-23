@@ -362,6 +362,10 @@ class FormModel(nn.Module):
             eps = self.config.eps
             bn = self.B.norm(dim=0, keepdim=True).clamp(min=eps)
             self.B.div_(bn)
+            st = self.ada._state.get(id(self.B))
+            if st is not None:
+                st["exp_avg"].mul_(bn)
+                st["exp_avg_sq"].mul_(bn.square())
 
         return step_max
 
