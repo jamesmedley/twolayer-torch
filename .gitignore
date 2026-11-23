@@ -1,0 +1,11 @@
+# Data directories
+/natural-movies
+/bsd500*
+
+# General 
+__pycache__/
+/output
+
+# Analysis output
+/analysis/checkpoints
+/analysis/output

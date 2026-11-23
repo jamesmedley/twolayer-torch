@@ -1,0 +1,14 @@
+natural-movies/
+output/
+analysis/checkpoints/
+analysis/output/
+__pycache__/
+*.py[cod]
+*.npy
+*.npz
+*.pt
+.venv/
+venv/
+.git/
+.pytest_cache/
+.mypy_cache/

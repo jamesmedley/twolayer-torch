@@ -1,0 +1,4 @@
+# Local-only analysis dependencies. torch and numpy come from the main
+# training environment.
+matplotlib>=3.8
+Pillow>=10
