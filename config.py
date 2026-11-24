@@ -21,7 +21,7 @@ OUTPUT_DIR = _PROJECT_ROOT / "output"
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-PATCH_SIZE = 20
+PATCH_SIZE = 32
 CLIP_LENGTH = 64
 CROP_MARGIN_TOP = 15
 CROP_MARGIN_LR = 4
@@ -40,7 +40,7 @@ WHITENING_PATCHES_PER_CROP = 20
 # ---------------------------------------------------------------------------
 # Layer 1: complex basis A
 # ---------------------------------------------------------------------------
-LAYER1_N_FEATURES = 400
+LAYER1_N_FEATURES = 1024
 LAYER1_LAMBDA_A = 10.0          # Cauchy sparsity weight
 LAYER1_BETA_A = 0.5             # slowness weight (energy uses an extra 0.5)
 LAYER1_SIGMA_SP_A = 0.4         # Cauchy sparsity scale
@@ -73,9 +73,6 @@ LAYER1_BATCH_SIZE = 64          # clips per batched inference call; one basis up
 LAYER1_ETA = 1e-4
 LAYER1_ETA_TARGET = 0.05
 LAYER1_ETA_ANNEAL_FACTOR = 0.25
-LAYER1_ADAM_LR = 1e-3          # Default Adam learning rate; overridden per-call by ``eta``.
-LAYER1_ADAM_BETAS = (0.9, 0.999)
-LAYER1_ADAM_EPS = 1e-8
 LAYER1_LOG_EVERY = 100
 LAYER1_SAVE_EVERY = 1
 SEED = 42
@@ -88,9 +85,8 @@ SEED = 42
 # feature count N (= n_input_dims). Paper values: 625 basis functions for both
 # B and D. Clips are 64 frames because raw chunks contain 64 frames each.
 # ---------------------------------------------------------------------------
-LAYER2_K = 100           # number of form (amplitude) basis functions in B
-LAYER2_L = 100          # number of motion (phase-transition) basis functions in D
-LAYER2_N_FEATURES = 400  # layer-1 feature count N (passed to construction)
+LAYER2_K = 625           # number of form (amplitude) basis functions in B
+LAYER2_L = 625          # number of motion (phase-transition) basis functions in D
 
 # Form 
 LAYER2_LAMBDA_V = 2        # sparsity weight on v
@@ -121,9 +117,6 @@ LAYER2_BATCH_SIZE = 64          # clips per batched inference call; one basis up
 LAYER2_ETA = 1e-4
 LAYER2_ETA_TARGET = 0.05
 LAYER2_ETA_ANNEAL_FACTOR = 0.25
-LAYER2_ADAM_LR = 1e-3
-LAYER2_ADAM_BETAS = (0.9, 0.999)
-LAYER2_ADAM_EPS = 1e-8
 LAYER2_LOG_EVERY = 100
 LAYER2_SAVE_EVERY = 1
 
