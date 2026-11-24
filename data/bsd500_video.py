@@ -44,6 +44,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 import config
@@ -83,6 +84,29 @@ def _bilinear_sample(image: np.ndarray, sy: np.ndarray, sx: np.ndarray) -> np.nd
     return wa * Ia + wb * Ib + wc * Ic + wd * Id
 
 
+def _bilinear_sample_torch(image: Tensor, sy: Tensor, sx: Tensor) -> Tensor:
+    """Bilinear-sample ``image`` (H, W) at float coords (sy, sx), edge-clamped.
+
+    Uses ``grid_sample`` with ``align_corners=True`` and ``padding_mode='border'``
+    so edge behaviour matches the NumPy :func:`_bilinear_sample`.
+    """
+    h, w = image.shape
+    T, P, _ = sy.shape
+    sy = sy.to(torch.float32)
+    sx = sx.to(torch.float32)
+    grid_y = (2.0 * sy / (h - 1) - 1.0).reshape(1, T * P, P)
+    grid_x = (2.0 * sx / (w - 1) - 1.0).reshape(1, T * P, P)
+    grid = torch.stack((grid_x, grid_y), dim=-1)  # (1, T*P, P, 2)
+    out = F.grid_sample(
+        image.unsqueeze(0).unsqueeze(0),  # (1, 1, H, W)
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+    return out[0, 0].reshape(T, P, P)
+
+
 def sample_bsd500_clips(
     images: np.ndarray,
     n_clips: int,
@@ -117,7 +141,11 @@ def sample_bsd500_clips(
     """
     if margins is None:
         margins = BSD500CropMargins()
-    images = np.asarray(images, dtype=np.float32)
+    use_torch = isinstance(images, torch.Tensor) and images.is_cuda
+    if use_torch:
+        images = images.to(dtype=torch.float32)
+    else:
+        images = np.asarray(images, dtype=np.float32)
     if images.ndim != 3:
         raise ValueError(f"images must have shape (N, H, W), got {images.shape}.")
     if n_clips < 0:
@@ -172,6 +200,48 @@ def sample_bsd500_clips(
     angle_deg = rng.uniform(rot_min, rot_max, size=n_clips)                 # (n_clips,)
     step_deg = angle_deg / clip_length                                      # (n_clips,)
 
+    if use_torch:
+        device = images.device
+        img_idx_t = torch.from_numpy(img_idx).to(device)
+        y0_t = torch.from_numpy(y0).to(device)
+        x0_t = torch.from_numpy(x0).to(device)
+        direction_t = torch.from_numpy(direction).to(device)
+        step_deg_t = torch.from_numpy(step_deg).to(device)
+
+        half = (patch_size - 1) / 2.0
+        dy = torch.arange(patch_size, dtype=torch.float64, device=device) - half
+        dx = torch.arange(patch_size, dtype=torch.float64, device=device) - half
+        dyy, dxx = torch.meshgrid(dy, dx, indexing="ij")
+
+        angles = (
+            torch.arange(clip_length, dtype=torch.float64, device=device)[None, :]
+            * step_deg_t[:, None]
+        )
+        angle_rad = torch.deg2rad(angles)
+        c = torch.cos(angle_rad)[:, :, None, None]
+        s = torch.sin(angle_rad)[:, :, None, None]
+        c_dyy = c * dyy[None, None, :, :]
+        s_dxx = s * dxx[None, None, :, :]
+        c_dxx = c * dxx[None, None, :, :]
+        s_dyy = s * dyy[None, None, :, :]
+
+        clips = torch.empty(
+            (n_clips, clip_length, patch_size, patch_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        for i in range(n_clips):
+            img = images[int(img_idx[i])]
+            oy = int(y0[i])
+            ox = int(x0[i])
+            d = float(direction[i])
+            off_y = c_dyy[i] + d * s_dxx[i]
+            off_x = c_dxx[i] - d * s_dyy[i]
+            src_y = oy + half + off_y
+            src_x = ox + half + off_x
+            clips[i] = _bilinear_sample_torch(img, src_y, src_x)
+        return clips
+
     # Patch-local destination coords relative to the patch centre.
     half = (patch_size - 1) / 2.0
     dy = np.arange(patch_size, dtype=np.float64) - half   # (P,)
@@ -216,11 +286,12 @@ class BSD500ClipStream:
     Mirrors :class:`data.dataset.Layer1ClipStream` so it can be swapped into
     the existing training loops unchanged:
 
-    * ``sample_raw_batch(n_clips)`` -> ``(B, T, P, P)`` raw float32 on CPU.
+    * ``sample_raw_batch(n_clips)`` -> ``(B, T, P, P)`` raw float32 (CPU or CUDA tensor).
     * ``sample_batch(n_clips)`` -> whitened ``(B, T, M)`` on the whitening device.
 
     Construction loads all stills into RAM once (BSD500 is small; ~500 images
-    at 128x128 float32 is ~32 MB).
+    at 128x128 float32 is ~32 MB). When the whitening transform lives on CUDA,
+    images are stored as a CUDA tensor and rotation is computed on the GPU.
     """
 
     def __init__(
@@ -244,6 +315,9 @@ class BSD500ClipStream:
                 f"images must have shape (N, H, W), got {images.shape}."
             )
         self.images = images
+        device = whitening.image_mean.device
+        if device.type == "cuda":
+            self.images = torch.from_numpy(images).to(device)
         self.whitening = whitening
         self.clip_length = int(clip_length)
         self.patch_size = int(
@@ -264,8 +338,8 @@ class BSD500ClipStream:
         self.rng = np.random.default_rng(seed)
         self.rotation_range_deg = (float(rotation_range_deg[0]), float(rotation_range_deg[1]))
 
-    def sample_raw_batch(self, n_clips: int | None = None) -> np.ndarray:
-        """Return ``(B, T, patch, patch)`` raw clips on the CPU."""
+    def sample_raw_batch(self, n_clips: int | None = None) -> np.ndarray | Tensor:
+        """Return ``(B, T, patch, patch)`` raw clips (CPU or CUDA tensor)."""
         count = self.batch_size if n_clips is None else int(n_clips)
         if count <= 0:
             raise ValueError(f"n_clips must be positive, got {count}.")
@@ -281,5 +355,7 @@ class BSD500ClipStream:
 
     def sample_batch(self, n_clips: int | None = None) -> Tensor:
         """Return a whitened ``(B, T, M)`` batch on the whitening device."""
-        clips = torch.from_numpy(self.sample_raw_batch(n_clips))
+        clips = self.sample_raw_batch(n_clips)
+        if isinstance(clips, np.ndarray):
+            clips = torch.from_numpy(clips)
         return self.whitening.whiten(clips)

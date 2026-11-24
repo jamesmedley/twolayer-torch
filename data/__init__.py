@@ -1,6 +1,7 @@
 """Data loading, sampling, and whitening for the two-layer model."""
 
 from .dataset import Layer1ClipStream
+from .prefetch import PrefetchStream
 from .sampling import CropMargins, sample_clips, sample_patches_from_chunk
 from .transforms import Whitening, WhiteningParams, learn_whitening
 from .video_loading import find_chunk_dir, load_raw_dataset
@@ -19,6 +20,7 @@ from .bsd500_video import (
 )
 
 __all__ = [
+    "PrefetchStream",
     "CropMargins",
     "Layer1ClipStream",
     "Whitening",

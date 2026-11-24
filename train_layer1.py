@@ -26,6 +26,7 @@ from data import (
     BSD500CropMargins,
     CropMargins,
     Layer1ClipStream,
+    PrefetchStream,
     WhiteningParams,
     bsd500_to_whitening_input,
     learn_whitening,
@@ -439,9 +440,11 @@ def main() -> None:
         epoch_energies: list[float] = []
 
         trial = 0
+        prefetcher = PrefetchStream(stream)
+        n_in_batch = min(args.batch_size, n_updates - trial)
+        prefetcher.prefetch(n_in_batch)
         for batch_idx in range(n_batches):
-            n_in_batch = min(args.batch_size, n_updates - trial)
-            x = stream.sample_batch(n_clips=n_in_batch)
+            x = prefetcher.fetch()
             T = x.shape[1]
 
             # One batched inference for the whole batch, with the batch-start
@@ -483,6 +486,9 @@ def main() -> None:
 
             trial_before = trial
             trial += n_in_batch
+            n_in_batch = min(args.batch_size, n_updates - trial)
+            if n_in_batch > 0:
+                prefetcher.prefetch(n_in_batch)
             if (trial_before // args.log_every) != (trial // args.log_every):
                 elapsed = time.perf_counter() - start_time
                 grad_real_mag = float(grad_A.real.abs().mean().item())
