@@ -3,8 +3,9 @@
 BSD500 contains still images, not video. This module synthesises a random
 video clip from a single still by selecting a random patch within the image
 and rotating the whole image about the centre of that patch, one frame at a
-time. Each video performs one full 360-degree rotation across its frames, so
-the per-frame rotation step is fixed at ``360 / clip_length`` degrees.
+time. Each video rotates through a total angle sampled uniformly from a
+configurable range (default 50–360°); the per-frame step is that total angle
+divided by ``clip_length``, so smaller ranges rotate slower.
 
 Rotation happens at sampling time (not baked into stored chunks), so each
 training batch draws freshly randomized rotation videos. The output has the
@@ -22,14 +23,18 @@ the layer-1 / layer-2 training loops:
 
 Transformation semantics
 -----------------------
-For each clip a single random patch origin is chosen within the crop margins.
-Every frame ``t`` is the full image rotated about that patch centre by
-``t * (360 / clip_length)`` degrees, so the clip completes one full 360
-degree rotation by the last frame. Rotation uses bilinear interpolation (pure
-NumPy, no PIL at runtime); out-of-bounds reads are edge-clamped.
+For each clip a single random patch origin, a single rotation direction
+(``+1`` clockwise or ``-1`` anti-clockwise), and a single total rotation angle
+(sampled uniformly from ``rotation_range_deg``) are chosen. Every frame ``t``
+of that clip is the full image rotated about that patch centre by
+``d * t * (angle / clip_length)`` degrees, where ``d`` is the clip's fixed
+direction and ``angle`` is its fixed total angle, so every frame of a video
+rotates the same way and the clip completes its total rotation by the last
+frame. Rotation uses bilinear interpolation (pure NumPy, no PIL at runtime);
+out-of-bounds reads are edge-clamped.
 
-There is no translation and no per-frame re-sampling: the rotation step is
-constant for the whole video.
+There is no translation and no per-frame re-sampling: the rotation step,
+total angle, and direction are constant for the whole video.
 """
 
 from __future__ import annotations
@@ -86,14 +91,25 @@ def sample_bsd500_clips(
     rng: np.random.Generator,
     *,
     margins: BSD500CropMargins | None = None,
+    rotation_range_deg: tuple[float, float] = (50.0, 360.0),
 ) -> np.ndarray:
     """Sample random synthetic video clips ``(n_clips, T, P, P)`` from stills.
 
-    Rotation happens at sampling time. Each clip picks one still and a random
-    PxP patch origin within the margins. The full image is rotated about the
-    patch centre by ``t * (360 / clip_length)`` degrees per frame, then the
-    PxP patch is cropped - so the same features rotate in place within the
-    patch region throughout the clip.
+    Rotation happens at sampling time. Each clip picks one still, a random PxP
+    patch origin within the margins, a single rotation direction (``+1``
+    clockwise or ``-1`` anti-clockwise), and a single total rotation angle
+    sampled uniformly from ``rotation_range_deg``. The full image is rotated
+    about the patch centre by ``d * t * (angle / clip_length)`` degrees per
+    frame, where ``d`` is the clip's fixed direction and ``angle`` is its fixed
+    total angle, then the PxP patch is cropped - so every frame of a video
+    rotates the same way.
+
+    Parameters
+    ----------
+    rotation_range_deg
+        ``(min_deg, max_deg)`` total rotation angle range in degrees, sampled
+        uniformly per clip. Default ``(50.0, 360.0)``. Pass ``(360.0, 360.0)``
+        to restore the previous fixed full-360° behaviour.
 
     Returns
     -------
@@ -110,6 +126,14 @@ def sample_bsd500_clips(
         raise ValueError(f"clip_length must be positive, got {clip_length}.")
     if patch_size <= 0:
         raise ValueError(f"patch_size must be positive, got {patch_size}.")
+
+    rot_min, rot_max = float(rotation_range_deg[0]), float(rotation_range_deg[1])
+    if rot_min < 0.0:
+        raise ValueError(f"rotation_range_deg min must be >= 0, got {rot_min}.")
+    if rot_max < rot_min:
+        raise ValueError(
+            f"rotation_range_deg max ({rot_max}) must be >= min ({rot_min})."
+        )
 
     n_images, height, width = images.shape
     if patch_size > height - margins.top - margins.bottom:
@@ -139,8 +163,14 @@ def sample_bsd500_clips(
         size=n_clips,
     )
 
-    # Fixed per-frame rotation so the clip completes one full 360 degrees.
-    step_deg = 360.0 / clip_length
+    # Per-clip rotation direction: +1 clockwise, -1 anti-clockwise. Drawn once
+    # per clip so every frame of a video rotates the same way.
+    direction = rng.choice([-1.0, 1.0], size=n_clips)
+
+    # Per-clip total rotation angle, sampled uniformly from the configured range.
+    # step_deg is degrees per frame = total angle / clip_length.
+    angle_deg = rng.uniform(rot_min, rot_max, size=n_clips)                 # (n_clips,)
+    step_deg = angle_deg / clip_length                                      # (n_clips,)
 
     # Patch-local destination coords relative to the patch centre.
     half = (patch_size - 1) / 2.0
@@ -151,19 +181,28 @@ def sample_bsd500_clips(
     # Per-frame source-coordinate offset (relative to patch centre).
     # Because rotation is about the patch centre, these offsets depend only
     # on (t, dy, dx) -- not on the clip origin (oy, ox) -- so they are
-    # computed once and reused for every clip.
-    angles = np.arange(clip_length, dtype=np.float64) * step_deg  # (T,)
-    angle_rad = np.deg2rad(angles)                                # (T,)
-    c = np.cos(angle_rad)[:, None, None]                          # (T, 1, 1)
-    s = np.sin(angle_rad)[:, None, None]                          # (T, 1, 1)
-    off_y = c * dyy[None, :, :] + s * dxx[None, :, :]             # (T, P, P)
-    off_x = -s * dyy[None, :, :] + c * dxx[None, :, :]            # (T, P, P)
+    # computed once per clip and reused across patches.
+    # angles: (n_clips, T); c/s: (n_clips, T, 1, 1) for per-clip steps.
+    angles = np.arange(clip_length, dtype=np.float64)[None, :] * step_deg[:, None]  # (n_clips, T)
+    angle_rad = np.deg2rad(angles)                                                     # (n_clips, T)
+    c = np.cos(angle_rad)[:, :, None, None]                                            # (n_clips, T, 1, 1)
+    s = np.sin(angle_rad)[:, :, None, None]                                            # (n_clips, T, 1, 1)
+    # Direction-independent component tables (n_clips, T, P, P). Combining with
+    # the per-clip sign d yields R(d * theta): d=+1 clockwise, d=-1 anti-clockwise.
+    c_dyy = c * dyy[None, None, :, :]
+    s_dxx = s * dxx[None, None, :, :]
+    c_dxx = c * dxx[None, None, :, :]
+    s_dyy = s * dyy[None, None, :, :]
 
     clips = np.empty((n_clips, clip_length, patch_size, patch_size), dtype=np.float32)
     for i in range(n_clips):
         img = images[int(img_idx[i])]
         oy = int(y0[i])
         ox = int(x0[i])
+        d = float(direction[i])
+        # Per-clip rotation offsets: R(d * theta_i) applied to (dy, dx).
+        off_y = c_dyy[i] + d * s_dxx[i]
+        off_x = c_dxx[i] - d * s_dyy[i]
         # src_y/src_x: (T, P, P) source coords for every patch pixel, every frame.
         src_y = oy + half + off_y
         src_x = ox + half + off_x
@@ -195,6 +234,7 @@ class BSD500ClipStream:
         margins: BSD500CropMargins | None = None,
         seed: int = config.SEED,
         image_size: int = config.BSD500_IMAGE_SIZE,
+        rotation_range_deg: tuple[float, float] = (50.0, 360.0),
     ) -> None:
         if isinstance(images, (str, Path)):
             images = images_to_array(images, size=image_size)
@@ -222,6 +262,7 @@ class BSD500ClipStream:
             bottom=config.CROP_MARGIN_BOTTOM,
         )
         self.rng = np.random.default_rng(seed)
+        self.rotation_range_deg = (float(rotation_range_deg[0]), float(rotation_range_deg[1]))
 
     def sample_raw_batch(self, n_clips: int | None = None) -> np.ndarray:
         """Return ``(B, T, patch, patch)`` raw clips on the CPU."""
@@ -235,6 +276,7 @@ class BSD500ClipStream:
             self.patch_size,
             self.rng,
             margins=self.margins,
+            rotation_range_deg=self.rotation_range_deg,
         )
 
     def sample_batch(self, n_clips: int | None = None) -> Tensor:

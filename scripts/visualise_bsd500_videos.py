@@ -76,34 +76,45 @@ def _plot_video_grid(videos: np.ndarray, out_path: Path, n_frames: int, title: s
 def _plot_video_gif(videos: np.ndarray, out_path: Path, title: str, fps: int = 10) -> None:
     """Save an animated GIF of ``(n_videos, T, H, W)`` videos rotating through frames.
 
-    Each animation frame shows one time step across all videos in a grid.
-    Uses PillowWriter (no ffmpeg dependency).
+    Videos are arranged in a 2D grid (rows × columns); each animation frame
+    advances all videos to the next time step simultaneously. Uses PillowWriter
+    (no ffmpeg dependency).
     """
     n_videos, n_frames, height, width = videos.shape
+    n_cols = int(np.ceil(np.sqrt(n_videos)))
+    n_rows = int(np.ceil(n_videos / n_cols))
     fig, axes = plt.subplots(
-        n_videos,
-        1,
-        figsize=(2.0, 2.0 * n_videos),
+        n_rows,
+        n_cols,
+        figsize=(2.2 * n_cols, 2.2 * n_rows),
         squeeze=False,
     )
     fig.suptitle(title, fontsize=10)
 
+    # Hide any unused subplot cells.
+    for r in range(n_rows):
+        for c in range(n_cols):
+            ax = axes[r, c]
+            ax.axis("off")
+            if r * n_cols + c >= n_videos:
+                continue
+
     ims = []
     for t in range(n_frames):
         row_ims = []
-        for r in range(n_videos):
-            ax = axes[r, 0]
-            im = ax.imshow(videos[r, t], cmap="gray", vmin=0, vmax=1, animated=True)
-            ax.axis("off")
-            if r == 0:
-                ax.set_title(f"t={t}", fontsize=8)
-            if t == 0:
-                ax.set_ylabel(f"video {r}", rotation=0, labelpad=30, fontsize=8)
-            row_ims.append(im)
+        for r in range(n_rows):
+            for c in range(n_cols):
+                vid_idx = r * n_cols + c
+                ax = axes[r, c]
+                if vid_idx >= n_videos:
+                    continue
+                im = ax.imshow(
+                    videos[vid_idx, t], cmap="gray", vmin=0, vmax=1, animated=True
+                )
+                if t == 0:
+                    ax.set_title(f"video {vid_idx}", fontsize=8)
+                row_ims.append(im)
         ims.append(row_ims)
-        # Clear titles for subsequent frames so they get updated properly
-        for r in range(n_videos):
-            axes[r, 0].set_title("")
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 

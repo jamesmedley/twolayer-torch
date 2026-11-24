@@ -124,6 +124,15 @@ def _parse_args() -> argparse.Namespace:
         help="Random seed for data sampling and basis initialisation.",
     )
     parser.add_argument(
+        "--bsd500-rotation-range",
+        type=float,
+        nargs=2,
+        default=(50.0, 360.0),
+        metavar=("MIN", "MAX"),
+        help="BSD500 total rotation angle range in degrees, sampled uniformly per clip "
+        "(default 50 360). Pass 360 360 for the previous fixed full-360 behaviour.",
+    )
+    parser.add_argument(
         "--num-patches",
         type=int,
         default=None,
@@ -304,6 +313,7 @@ def main() -> None:
             margins=margins,
             seed=args.seed,
             image_size=config.BSD500_IMAGE_SIZE,
+            rotation_range_deg=args.bsd500_rotation_range,
         )
     elif has_chunks:
         # Natural-movies chunks: pre-baked video, rotation already baked in.
