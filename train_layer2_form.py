@@ -175,13 +175,6 @@ def _parse_args() -> argparse.Namespace:
         help="Log every N updates within an epoch.",
     )
     parser.add_argument(
-        "--minibatch-step-divisor",
-        type=float,
-        default=None,
-        help="step_max is divided by this before comparing with the eta target. "
-        "Defaults to the number of clips in the batch.",
-    )
-    parser.add_argument(
         "--save-every",
         type=int,
         default=config.LAYER2_SAVE_EVERY,
@@ -333,8 +326,6 @@ def main() -> None:
         raise SystemExit("--trials-per-epoch must be positive.")
     if args.batch_size <= 0:
         raise SystemExit("--batch-size must be positive.")
-    if args.minibatch_step_divisor is not None and args.minibatch_step_divisor <= 0:
-        raise SystemExit("--minibatch-step-divisor must be positive.")
     if args.init_b is not None and args.resume is not None:
         raise SystemExit("Use only one of --init-b and --resume.")
     if args.loga_stats is not None and args.n_stats_clips > 0:
@@ -639,11 +630,10 @@ def main() -> None:
             # step per batch.
             with torch.no_grad():
                 grad_B = form_model.basis_gradient(loga, v)
-            step_max = form_model.adapt_basis_(grad_B, eta=eta, n_frames=T)
+            step_max = form_model.adapt_basis_(grad_B, eta=eta, n_frames=n_in_batch * T)
             step_max_value = float(step_max)
 
-            divisor = args.minibatch_step_divisor or float(n_in_batch)
-            if step_max_value / divisor > target:
+            if step_max_value > target:
                 eta *= 0.95
             else:
                 eta *= 1.02
