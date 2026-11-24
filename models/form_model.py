@@ -17,8 +17,7 @@ The energy is:
 
 where slowness is applied along the time axis. ``v`` (shape ``(B, T, K)``) is
 inferred by L-BFGS with ``A`` / ``B`` fixed; ``B`` is then updated with one
-Adam step per batch followed by column-normalisation, mirroring
-:class:`models.layer1.Layer1`.
+steepest-descent step per batch followed by column-normalisation.
 """
 
 from __future__ import annotations
@@ -31,9 +30,6 @@ import torch
 from torch import Tensor, nn
 
 from config import (
-    LAYER2_ADAM_BETAS,
-    LAYER2_ADAM_EPS,
-    LAYER2_ADAM_LR,
     LAYER2_BETA_V,
     LAYER2_EPS,
     LAYER2_FORM_SIGMA_A2,
@@ -133,13 +129,6 @@ class FormModel(nn.Module):
             dtype=dtype,
         )
         self.B = nn.Parameter(B.clone())
-
-        self.ada = ops.Adam(
-            [self.B],
-            lr=LAYER2_ADAM_LR,
-            betas=LAYER2_ADAM_BETAS,
-            eps=LAYER2_ADAM_EPS,
-        )
 
     @torch.no_grad()
     def set_basis_(self, B: Tensor) -> None:
@@ -329,15 +318,11 @@ class FormModel(nn.Module):
         *,
         normalise: bool = True,
     ) -> Tensor:
-        """Apply one Adam step to ``B`` then project onto the unit-sphere.
+        """Apply one steepest-descent step to ``B`` then project onto the unit-sphere.
 
-        Replaces the fixed-step gradient descent with an Adam update
-        (per-parameter adaptive learning rate), followed by column-normalisation
-        of ``B``.
+        ``eta`` is passed through as the learning rate.
 
-        ``eta`` is passed through as the Adam learning rate.
-
-        Returns the maximum absolute Adam update (pre-projection), which the
+        Returns the maximum absolute update (pre-projection), which the
         training loop uses for the adaptive ``eta`` schedule.
         """
         if grad_B.dtype != self.B.dtype:
@@ -355,17 +340,14 @@ class FormModel(nn.Module):
             raise ValueError(f"eta must be non-negative, got {eta}.")
 
         grad = grad_B / float(n_frames)
-        updates = self.ada.step([self.B], [grad], lr=eta)
-        step_max = float(updates[0].abs().max().item())
+        update = eta * grad
+        self.B.sub_(update)
+        step_max = float(update.abs().max().item())
 
         if normalise:
             eps = self.config.eps
             bn = self.B.norm(dim=0, keepdim=True).clamp(min=eps)
             self.B.div_(bn)
-            st = self.ada._state.get(id(self.B))
-            if st is not None:
-                st["exp_avg"].mul_(bn)
-                st["exp_avg_sq"].mul_(bn.square())
 
         return step_max
 

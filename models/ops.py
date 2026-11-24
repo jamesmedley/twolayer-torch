@@ -4,13 +4,9 @@ Penalty functions return elementwise values. The corresponding ``*_grad``
 functions return the derivative of the unscaled penalty with respect to the
 input, so the same pairs can be reused by both layer 1 and layer 2.
 
-The :class:`Adam` class is stateful and used by :class:`models.layer1.Layer1`
-for adaptive basis updates.
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 from torch import Tensor
@@ -219,111 +215,6 @@ def wrap_phase(phi: Tensor) -> Tensor:
     return torch.atan2(torch.sin(phi), torch.cos(phi))
 
 
-class Adam:
-    """Stateful Adam optimiser for a fixed list of tensors.
-
-    Parameters are keyed by object identity, so callers must pass the same
-    ``params`` objects to every :meth:`step` call. Parameters are updated in
-    place and the per-parameter update tensors are returned. State (first and
-    second moments, step count) travels with the parameter object; if two
-    parameters' data are exchanged in place (for example swapping Re/Im of a
-    complex basis), use :meth:`swap_state` to keep the moments aligned with
-    their data.
-    """
-
-    def __init__(
-        self,
-        params: list[Tensor],
-        lr: float = 1e-3,
-        betas: tuple[float, float] = (0.9, 0.999),
-        eps: float = 1e-8,
-    ) -> None:
-        self.lr = float(lr)
-        self.betas = betas
-        self.eps = float(eps)
-        self._state: dict[int, dict] = {}
-        for p in params:
-            self._state[id(p)] = {
-                "step": 0,
-                "exp_avg": torch.zeros_like(p),
-                "exp_avg_sq": torch.zeros_like(p),
-            }
-
-    def step(
-        self,
-        params: list[Tensor],
-        grads: list[Tensor],
-        lr: float | None = None,
-    ) -> list[Tensor]:
-        """Apply one bias-corrected Adam step to ``params`` using ``grads``.
-
-        ``params`` and ``grads`` must be parallel lists of the same length.
-        Parameters are updated in place. Returns the per-parameter update
-        tensors (pre-projection).
-        """
-        if len(params) != len(grads):
-            raise ValueError(
-                f"params and grads must have the same length; got "
-                f"{len(params)} and {len(grads)}."
-            )
-        lr = self.lr if lr is None else float(lr)
-        beta1, beta2 = self.betas
-        updates: list[Tensor] = []
-        for p, g in zip(params, grads):
-            st = self._state.get(id(p))
-            if st is None:
-                # Lazily allocate state on the gradient's device so the
-                # optimiser works even if the model was moved (e.g. CPU ->
-                # CUDA) after construction.
-                st = {
-                    "step": 0,
-                    "exp_avg": torch.zeros_like(g),
-                    "exp_avg_sq": torch.zeros_like(g),
-                }
-                self._state[id(p)] = st
-            else:
-                # State may be on a different device than the gradient if the
-                # model was moved between construction and this step.
-                if st["exp_avg"].device != g.device:
-                    st["exp_avg"] = st["exp_avg"].to(g.device)
-                    st["exp_avg_sq"] = st["exp_avg_sq"].to(g.device)
-
-            st["step"] += 1
-            exp_avg = st["exp_avg"]
-            exp_avg_sq = st["exp_avg_sq"]
-
-            # First moment: m = beta1 * m + (1 - beta1) * g
-            exp_avg.lerp_(g, 1.0 - beta1)
-            # Second moment: v = beta2 * v + (1 - beta2) * g^2
-            exp_avg_sq.lerp_(g.square(), 1.0 - beta2)
-
-            bias_correction1 = 1.0 - beta1 ** st["step"]
-            bias_correction2 = 1.0 - beta2 ** st["step"]
-            step_size = lr * math.sqrt(bias_correction2) / bias_correction1
-
-            denom = exp_avg_sq.sqrt().add_(self.eps)
-            update = (exp_avg / denom) * step_size
-            p.sub_(update)
-            updates.append(update)
-
-        return updates
-
-    def swap_state(self, p: Tensor, q: Tensor) -> None:
-        """Swap the Adam state (moments and step count) between two parameters.
-
-        Use this after exchanging the data of two parameters in place (for
-        example ``swap_real_imag_``) so the moments stay aligned with their
-        data.
-        """
-        sp = self._state.get(id(p))
-        sq = self._state.get(id(q))
-        if sp is None or sq is None:
-            return
-        sp["exp_avg"], sq["exp_avg"] = sq["exp_avg"], sp["exp_avg"]
-        sp["exp_avg_sq"], sq["exp_avg_sq"] = sq["exp_avg_sq"], sp["exp_avg_sq"]
-        sp["step"], sq["step"] = sq["step"], sp["step"]
-
-
 __all__ = [
     "cauchy_penalty",
     "cauchy_penalty_grad",
@@ -336,5 +227,4 @@ __all__ = [
     "init_real_basis",
     "init_complex_basis",
     "wrap_phase",
-    "Adam",
 ]

@@ -22,9 +22,8 @@ The energy is:
       + 0.5 * beta_w * sum(slowness(w))
 
 where slowness is applied along the time axis. ``w`` (shape ``(B, T, L)``) is
-inferred by L-BFGS with ``D`` fixed; ``D`` is then updated with one Adam step
-per batch followed by column-normalisation, mirroring
-:class:`models.layer1.Layer1`.
+inferred by L-BFGS with ``D`` fixed; ``D`` is then updated with one
+steepest-descent step per batch followed by column-normalisation.
 """
 
 from __future__ import annotations
@@ -37,9 +36,6 @@ import torch
 from torch import Tensor, nn
 
 from config import (
-    LAYER2_ADAM_BETAS,
-    LAYER2_ADAM_EPS,
-    LAYER2_ADAM_LR,
     LAYER2_BETA_W,
     LAYER2_EPS,
     LAYER2_INFER_CONV_TOL,
@@ -164,13 +160,6 @@ class MotionModel(nn.Module):
             dtype=dtype,
         )
         self.D = nn.Parameter(D.clone())
-
-        self.ada = ops.Adam(
-            [self.D],
-            lr=LAYER2_ADAM_LR,
-            betas=LAYER2_ADAM_BETAS,
-            eps=LAYER2_ADAM_EPS,
-        )
 
     @torch.no_grad()
     def set_basis_(self, D: Tensor) -> None:
@@ -396,15 +385,11 @@ class MotionModel(nn.Module):
         *,
         normalise: bool = True,
     ) -> Tensor:
-        """Apply one Adam step to ``D`` then project onto the unit-sphere.
+        """Apply one steepest-descent step to ``D`` then project onto the unit-sphere.
 
-        Replaces the fixed-step gradient descent with an Adam update
-        (per-parameter adaptive learning rate), followed by column-normalisation
-        of ``D``.
+        ``eta`` is passed through as the learning rate.
 
-        ``eta`` is passed through as the Adam learning rate.
-
-        Returns the maximum absolute Adam update (pre-projection), which the
+        Returns the maximum absolute update (pre-projection), which the
         training loop uses for the adaptive ``eta`` schedule.
         """
         if grad_D.dtype != self.D.dtype:
@@ -422,22 +407,14 @@ class MotionModel(nn.Module):
             raise ValueError(f"eta must be non-negative, got {eta}.")
 
         grad = grad_D / float(n_frames)
-        updates = self.ada.step([self.D], [grad], lr=eta)
-        step_max = float(updates[0].abs().max().item())
+        update = eta * grad
+        self.D.sub_(update)
+        step_max = float(update.abs().max().item())
 
         if normalise:
             eps = self.config.eps
             dn = self.D.norm(dim=0, keepdim=True).clamp(min=eps)
             self.D.div_(dn)
-            # Re-scale Adam moments so they stay aligned with the
-            # re-normalised parameter geometry. Since p -> p / dn scales
-            # gradients by dn, the first moment scales by dn and the
-            # second moment by dn^2. The ratio m / sqrt(v) is invariant,
-            # preserving Adam's adaptive learning-rate behaviour.
-            st = self.ada._state.get(id(self.D))
-            if st is not None:
-                st["exp_avg"].mul_(dn)
-                st["exp_avg_sq"].mul_(dn.square())
 
         return step_max
 

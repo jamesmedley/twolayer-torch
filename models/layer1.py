@@ -27,9 +27,6 @@ from torch import Tensor, nn
 
 from config import (
     LAYER1_A_THRESH,
-    LAYER1_ADAM_BETAS,
-    LAYER1_ADAM_EPS,
-    LAYER1_ADAM_LR,
     LAYER1_BETA_A,
     LAYER1_EPS,
     LAYER1_INFER_INIT,
@@ -201,16 +198,6 @@ class Layer1(nn.Module):
                     f"expected {self.n_input_dims}, got {weights.numel()}."
                 )
         self.register_buffer("noise_weights", weights)
-
-        # Adaptive basis optimiser over A_real / A_imag. ``eta`` is passed as
-        # the learning rate on every :meth:`adapt_basis_` call, so the
-        # constructor lr is only a fallback default.
-        self.ada = ops.Adam(
-            [self.A_real, self.A_imag],
-            lr=LAYER1_ADAM_LR,
-            betas=LAYER1_ADAM_BETAS,
-            eps=LAYER1_ADAM_EPS,
-        )
 
     # ------------------------------------------------------------------
     # Basis access
@@ -624,16 +611,12 @@ class Layer1(nn.Module):
         normalise: bool = True,
         swap: bool | None = None,
     ) -> Tensor:
-        """Apply one Adam step to ``A`` then project onto the constraint manifold.
+        """Apply one steepest-descent step to ``A`` then project onto the constraint manifold.
 
-        Replaces the fixed-step gradient descent with an Adam update
-        (per-parameter adaptive learning rate), followed by the same
-        Gram-Schmidt / optional Re/Im swap / column-renorm projection.
-
-        ``eta`` is passed through as the Adam learning rate, so the existing
+        ``eta`` is passed through as the learning rate, so the existing
         adaptive eta controller in ``train_layer1.py`` is unchanged.
 
-        Returns the maximum absolute Adam update (pre-projection), which the
+        Returns the maximum absolute update (pre-projection), which the
         training loop uses for the adaptive ``eta`` schedule.
         """
         if swap is None:
@@ -650,16 +633,16 @@ class Layer1(nn.Module):
         if eta < 0:
             raise ValueError(f"eta must be non-negative, got {eta}.")
 
-        # Per-frame average gradient, then Adam update (in place on A_real/A_imag).
+        # Per-frame average gradient, then steepest-descent update
+        # (in place on A_real/A_imag).
         grad = grad_A / float(n_frames)
-        updates = self.ada.step(
-            [self.A_real, self.A_imag],
-            [grad.real, grad.imag],
-            lr=eta,
-        )
+        update_real = eta * grad.real
+        update_imag = eta * grad.imag
+        self.A_real.sub_(update_real)
+        self.A_imag.sub_(update_imag)
         step_max = max(
-            float(updates[0].abs().max().item()),
-            float(updates[1].abs().max().item()),
+            float(update_real.abs().max().item()),
+            float(update_imag.abs().max().item()),
         )
 
         if normalise:
@@ -674,22 +657,12 @@ class Layer1(nn.Module):
 
             if swap:
                 self.swap_real_imag_()
-                # Carry Adam momentum with the swapped data so state stays aligned.
-                self.ada.swap_state(self.A_real, self.A_imag)
 
             # Renorm Re(A) and Im(A) separately to unit norm (per column).
             rn = self.A_real.norm(dim=0, keepdim=True).clamp(min=eps)
             im = self.A_imag.norm(dim=0, keepdim=True).clamp(min=eps)
             self.A_real.div_(rn)
-            st = self.ada._state.get(id(self.A_real))
-            if st is not None:
-                st["exp_avg"].mul_(rn)
-                st["exp_avg_sq"].mul_(rn.square())
             self.A_imag.div_(im)
-            st = self.ada._state.get(id(self.A_imag))
-            if st is not None:
-                st["exp_avg"].mul_(im)
-                st["exp_avg_sq"].mul_(im.square())
 
         return step_max
 
